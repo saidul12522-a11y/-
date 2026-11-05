@@ -1,0 +1,80 @@
+# Place this file at  .github/workflows/render.yml  in a repo that contains ONLY:
+#   - ghazal-video.zip   (the Remotion project ZIP, at the repo root)
+# Then: Actions → "Render video from ZIP" → Run workflow → download the "ghazal-video-mp4" artifact.
+name: Render video from ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      zipFile:
+        description: "ZIP file name in the repo root (leave empty to use the first .zip found)"
+        type: string
+        default: ""
+      renderVoiceover:
+        description: "Include public/voiceover.mp3 in the video? (default: SFX only)"
+        type: boolean
+        default: false
+  push:
+    paths:
+      - "*.zip"
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Unpack the ZIP and locate the Remotion project
+        run: |
+          ZIP="${{ inputs.zipFile }}"
+          if [ -z "$ZIP" ]; then ZIP="$(ls -1 *.zip 2>/dev/null | head -n 1)"; fi
+          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
+            echo "::error::No ZIP file found in the repository root."; exit 1
+          fi
+          echo "Using ZIP: $ZIP"
+          mkdir -p _unpacked
+          unzip -q -o "$ZIP" -d _unpacked
+          PKG="$(find _unpacked -name package.json -not -path '*/node_modules/*' | awk '{ print length, $0 }' | sort -n | head -n 1 | cut -d' ' -f2-)"
+          if [ -z "$PKG" ]; then echo "::error::package.json not found inside the ZIP."; exit 1; fi
+          DIR="$(dirname "$PKG")"
+          if [ ! -f "$DIR/src/index.ts" ]; then echo "::error::src/index.ts not found in $DIR"; exit 1; fi
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          echo "Project folder: $DIR"
+          ls -la "$DIR"
+
+      # Libraries needed by the headless Chrome that Remotion downloads on first use
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
+            libcairo2 fonts-noto-core
+          sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
+
+      # postinstall copies the Bengali WOFF2 fonts into public/fonts
+      - name: Install packages
+        run: cd "$PROJECT_DIR" && npm install
+
+      - name: Check project (informational)
+        run: cd "$PROJECT_DIR" && npm run check
+        continue-on-error: true
+
+      - name: Render MP4
+        run: |
+          cd "$PROJECT_DIR"
+          PROPS='{"renderVoiceover":false}'
+          if [ "${{ inputs.renderVoiceover }}" = "true" ]; then PROPS='{"renderVoiceover":true}'; fi
+          npx remotion render src/index.ts Main out/video.mp4 --codec h264 --crf 17 --props="$PROPS"
+          cp out/video.mp4 "$GITHUB_WORKSPACE/video.mp4"
+
+      - name: Upload video
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghazal-video-mp4
+          path: video.mp4
+          retention-days: 14
