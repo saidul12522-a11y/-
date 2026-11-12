@@ -1,8 +1,12 @@
-name: Render Ghazal Video
+name: Render Ghazal Video (from ZIP)
 
 on:
   workflow_dispatch:
     inputs:
+      zip_path:
+        description: "ZIP ফাইলের পাথ (ফাঁকা রাখলে রিপোর রুটের প্রথম .zip নেবে)"
+        type: string
+        default: ""
       with_voiceover:
         description: "MP4-তে voiceover যুক্ত করবেন?"
         type: boolean
@@ -11,6 +15,9 @@ on:
         description: "Render concurrency (যেমন 2 বা 50%) — ফাঁকা রাখলে ডিফল্ট"
         type: string
         default: ""
+  push:
+    paths:
+      - "*.zip"
 
 jobs:
   render:
@@ -20,6 +27,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Unzip project
+        id: unzip
+        env:
+          ZIP_INPUT: ${{ inputs.zip_path }}
+        run: |
+          ZIP="$ZIP_INPUT"
+          if [ -z "$ZIP" ]; then ZIP="$(ls -1 *.zip 2>/dev/null | head -n1)"; fi
+          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
+            echo "::error::কোনো ZIP ফাইল পাওয়া যায়নি। ZIP রিপোর রুটে রাখুন বা zip_path দিন।"
+            exit 1
+          fi
+          echo "Using ZIP: $ZIP"
+          rm -rf project && mkdir project
+          unzip -q "$ZIP" -d project
+          PKG="$(find project -maxdepth 3 -name package.json -not -path '*/node_modules/*' | head -n1)"
+          if [ -z "$PKG" ]; then
+            echo "::error::ZIP-এর ভেতরে package.json পাওয়া যায়নি।"
+            exit 1
+          fi
+          DIR="$(dirname "$PKG")"
+          if [ ! -f "$DIR/src/index.ts" ]; then
+            echo "::error::$DIR/src/index.ts পাওয়া যায়নি।"
+            exit 1
+          fi
+          echo "Project dir: $DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -35,28 +69,35 @@ jobs:
             libxcomposite1 libxdamage1 libgbm-dev libcups2t64 libpango-1.0-0 libcairo2
 
       - name: Install dependencies
+        working-directory: ${{ steps.unzip.outputs.dir }}
         run: npm install --no-audit --no-fund
 
       - name: Make sure Remotion's browser is available
+        working-directory: ${{ steps.unzip.outputs.dir }}
         run: npx remotion browser ensure
 
       - name: Include voiceover in the MP4 (optional)
         if: ${{ inputs.with_voiceover }}
+        working-directory: ${{ steps.unzip.outputs.dir }}
         run: sed -i 's/VOICEOVER_IN_RENDER = false/VOICEOVER_IN_RENDER = true/' src/components/PreviewAudio.tsx
 
       - name: Type check
+        working-directory: ${{ steps.unzip.outputs.dir }}
         run: npm run typecheck
 
       - name: Render MP4
+        working-directory: ${{ steps.unzip.outputs.dir }}
+        env:
+          CONCURRENCY: ${{ inputs.concurrency }}
         run: |
           mkdir -p out
           ARGS=""
-          if [ -n "${{ inputs.concurrency }}" ]; then ARGS="--concurrency=${{ inputs.concurrency }}"; fi
+          if [ -n "$CONCURRENCY" ]; then ARGS="--concurrency=$CONCURRENCY"; fi
           npx remotion render src/index.ts Main out/video.mp4 $ARGS
 
       - name: Upload video
         uses: actions/upload-artifact@v4
         with:
           name: ghazal-video
-          path: out/video.mp4
+          path: ${{ steps.unzip.outputs.dir }}/out/video.mp4
           retention-days: 14
