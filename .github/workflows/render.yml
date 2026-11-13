@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       zip_path:
-        description: "ZIP ফাইলের পাথ (ফাঁকা রাখলে রিপোর রুটের প্রথম .zip নেবে)"
+        description: "ZIP ফাইলের পাথ (ফাঁকা রাখলে ghazal-remotion-project-v2.zip, না পেলে রুটের প্রথম .zip)"
         type: string
-        default: ""
+        default: "ghazal-remotion-project-v2.zip"
       with_voiceover:
         description: "MP4-তে voiceover যুক্ত করবেন?"
         type: boolean
@@ -28,15 +28,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Unzip project
+      - name: Find and unzip the project
         id: unzip
         env:
           ZIP_INPUT: ${{ inputs.zip_path }}
         run: |
-          ZIP="$ZIP_INPUT"
-          if [ -z "$ZIP" ]; then ZIP="$(ls -1 *.zip 2>/dev/null | head -n1)"; fi
+          ZIP="${ZIP_INPUT:-ghazal-remotion-project-v2.zip}"
+          if [ ! -f "$ZIP" ]; then
+            echo "::warning::'$ZIP' পাওয়া যায়নি, রুটের প্রথম .zip নিচ্ছি"
+            ZIP="$(ls -1 *.zip 2>/dev/null | head -n1)"
+          fi
           if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
-            echo "::error::কোনো ZIP ফাইল পাওয়া যায়নি। ZIP রিপোর রুটে রাখুন বা zip_path দিন।"
+            echo "::error::কোনো ZIP ফাইল পাওয়া যায়নি। ZIP রিপোর রুটে রাখুন।"
             exit 1
           fi
           echo "Using ZIP: $ZIP"
