@@ -1,106 +1,42 @@
-name: Render Ghazal Video (from ZIP)
+
+name: Render Ghazal Video
 
 on:
   workflow_dispatch:
-    inputs:
-      zip_path:
-        description: "ZIP ফাইলের পাথ (ফাঁকা রাখলে ghazal-remotion-project-v2.zip, না পেলে রুটের প্রথম .zip)"
-        type: string
-        default: "ghazal-remotion-project-v2.zip"
-      with_voiceover:
-        description: "MP4-তে voiceover যুক্ত করবেন?"
-        type: boolean
-        default: false
-      concurrency:
-        description: "Render concurrency (যেমন 2 বা 50%) — ফাঁকা রাখলে ডিফল্ট"
-        type: string
-        default: ""
-  push:
-    paths:
-      - "*.zip"
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Find and unzip the project
-        id: unzip
-        env:
-          ZIP_INPUT: ${{ inputs.zip_path }}
-        run: |
-          ZIP="${ZIP_INPUT:-ghazal-remotion-project-v2.zip}"
-          if [ ! -f "$ZIP" ]; then
-            echo "::warning::'$ZIP' পাওয়া যায়নি, রুটের প্রথম .zip নিচ্ছি"
-            ZIP="$(ls -1 *.zip 2>/dev/null | head -n1)"
-          fi
-          if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
-            echo "::error::কোনো ZIP ফাইল পাওয়া যায়নি। ZIP রিপোর রুটে রাখুন।"
-            exit 1
-          fi
-          echo "Using ZIP: $ZIP"
-          rm -rf project && mkdir project
-          unzip -q "$ZIP" -d project
-          PKG="$(find project -maxdepth 3 -name package.json -not -path '*/node_modules/*' | head -n1)"
-          if [ -z "$PKG" ]; then
-            echo "::error::ZIP-এর ভেতরে package.json পাওয়া যায়নি।"
-            exit 1
-          fi
-          DIR="$(dirname "$PKG")"
-          if [ ! -f "$DIR/src/index.ts" ]; then
-            echo "::error::$DIR/src/index.ts পাওয়া যায়নি।"
-            exit 1
-          fi
-          echo "Project dir: $DIR"
-          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 20
 
-      - name: Install system libraries for Chromium
+      - name: Extract Project
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 libdbus-1-3 libatk1.0-0t64 libatk-bridge2.0-0t64 \
-            libasound2t64 libxrandr2 libxkbcommon-dev libxfixes3 \
-            libxcomposite1 libxdamage1 libgbm-dev libcups2t64 libpango-1.0-0 libcairo2
+          unzip -q ghazal-tiktok23.zip -d project
 
-      - name: Install dependencies
-        working-directory: ${{ steps.unzip.outputs.dir }}
-        run: npm install --no-audit --no-fund
+      - name: Install Dependencies
+        working-directory: project/ghazal-video
+        run: npm install
 
-      - name: Make sure Remotion's browser is available
-        working-directory: ${{ steps.unzip.outputs.dir }}
+      - name: Setup Browser
+        working-directory: project/ghazal-video
         run: npx remotion browser ensure
 
-      - name: Include voiceover in the MP4 (optional)
-        if: ${{ inputs.with_voiceover }}
-        working-directory: ${{ steps.unzip.outputs.dir }}
-        run: sed -i 's/VOICEOVER_IN_RENDER = false/VOICEOVER_IN_RENDER = true/' src/components/PreviewAudio.tsx
-
-      - name: Type check
-        working-directory: ${{ steps.unzip.outputs.dir }}
-        run: npm run typecheck
-
       - name: Render MP4
-        working-directory: ${{ steps.unzip.outputs.dir }}
-        env:
-          CONCURRENCY: ${{ inputs.concurrency }}
-        run: |
-          mkdir -p out
-          ARGS=""
-          if [ -n "$CONCURRENCY" ]; then ARGS="--concurrency=$CONCURRENCY"; fi
-          npx remotion render src/index.ts Main out/video.mp4 $ARGS
+        working-directory: project/ghazal-video
+        run: npx remotion render src/index.ts Main out/video.mp4
 
-      - name: Upload video
+      - name: Upload MP4
         uses: actions/upload-artifact@v4
         with:
-          name: ghazal-video
-          path: ${{ steps.unzip.outputs.dir }}/out/video.mp4
-          retention-days: 14
+          name: ghazal-video-mp4
+          path: project/ghazal-video/out/video.mp4
+          retention-days: 7
