@@ -1,45 +1,76 @@
-name: Render video
 
-# Manual run: GitHub -> Actions -> "Render video" -> Run workflow.
-# The finished MP4 is attached to the run as an artifact named "shit-keno-ashe-mp4".
+name: Render Video from ZIP
+
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
+
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Extract ZIP Project
+        run: |
+          set -e
+          mkdir -p project
+          unzip -q ShitKenoAsheExplainer_Backup_03_100pct.zip -d project
+          test -f project/package.json
+          test -f project/package-lock.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: project/package-lock.json
 
-      - name: Install system libraries for Chrome
+      - name: Install Chrome Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libnss3 libdbus-1-3 libatk1.0-0t64 libatk-bridge2.0-0t64 libasound2t64 libxrandr2 libxkbcommon0 libxfixes3 libxcomposite1 libxdamage1 libgbm1 libcups2t64 libpango-1.0-0 libcairo2
+          sudo apt-get install -y \
+            libnss3 \
+            libdbus-1-3 \
+            libatk1.0-0t64 \
+            libatk-bridge2.0-0t64 \
+            libasound2t64 \
+            libxrandr2 \
+            libxkbcommon0 \
+            libxfixes3 \
+            libxcomposite1 \
+            libxdamage1 \
+            libgbm1 \
+            libcups2t64 \
+            libpango-1.0-0 \
+            libcairo2
 
-      - name: Install dependencies
+      - name: Install NPM Packages
+        working-directory: project
         run: npm ci
 
-      - name: Type check
+      - name: TypeScript Check
+        working-directory: project
         run: npm run typecheck
 
-      - name: Render MP4
+      - name: Render MP4 Video
+        working-directory: project
         run: npm run render
 
-      - name: Check the MP4 (duration, size, fps)
-        run: npx remotion ffprobe out/shit-keno-ashe.mp4 || true
+      - name: Check Rendered Video
+        run: |
+          test -s project/out/shit-keno-ashe.mp4
+          echo "Video rendered successfully!"
 
-      - name: Upload MP4
+      - name: Upload MP4 Video
         uses: actions/upload-artifact@v4
         with:
-          name: shit-keno-ashe-mp4
-          path: out/shit-keno-ashe.mp4
+          name: Shit-Keno-Ashe-Video
+          path: project/out/shit-keno-ashe.mp4
           if-no-files-found: error
           retention-days: 30
