@@ -1,53 +1,45 @@
+name: Render video
 
-name: Render Video from ZIP
-
+# Manual run: GitHub -> Actions -> "Render video" -> Run workflow.
+# The finished MP4 is attached to the run as an artifact named "shit-keno-ashe-mp4".
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '*.zip'
-      - '.github/workflows/render.yml'
-
-permissions:
-  contents: read
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-
+    timeout-minutes: 90
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Extract ZIP
-        run: |
-          mkdir -p project
-          unzip -o ChatGPTIndiaExplainer_Backup_01_100pct.zip -d project
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
 
-      - name: Install Dependencies
-        working-directory: project
+      - name: Install system libraries for Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libdbus-1-3 libatk1.0-0t64 libatk-bridge2.0-0t64 libasound2t64 libxrandr2 libxkbcommon0 libxfixes3 libxcomposite1 libxdamage1 libgbm1 libcups2t64 libpango-1.0-0 libcairo2
+
+      - name: Install dependencies
         run: npm ci
 
-      - name: Setup Remotion Browser
-        working-directory: project
-        run: npx remotion browser ensure
+      - name: Type check
+        run: npm run typecheck
 
-      - name: Render Video
-        working-directory: project
-        run: |
-          mkdir -p out
-          npm run render
+      - name: Render MP4
+        run: npm run render
+
+      - name: Check the MP4 (duration, size, fps)
+        run: npx remotion ffprobe out/shit-keno-ashe.mp4 || true
 
       - name: Upload MP4
         uses: actions/upload-artifact@v4
         with:
-          name: ChatGPTIndia-Rendered-Video
-          path: project/out/chatgpt-india.mp4
+          name: shit-keno-ashe-mp4
+          path: out/shit-keno-ashe.mp4
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
