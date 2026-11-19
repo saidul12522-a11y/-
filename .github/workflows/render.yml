@@ -24,29 +24,58 @@ jobs:
         with:
           node-version: 20
 
-      - name: Extract ZIP Automatically
+      - name: Extract ZIP
         run: |
           mkdir -p project
           unzip -q "saidul-মশা-video.zip" -d project
 
-      - name: Install Dependencies
+      - name: Verify Project Files
         working-directory: project/MosquitoExplainer
         run: |
-          rm -f package-lock.json
-          npm install
+          test -f package.json
+          test -f package-lock.json
+          test -f public/voice.mp3
+          echo "Project files verified."
 
-      - name: Setup Remotion Browser
+      - name: Install Dependencies
+        working-directory: project/MosquitoExplainer
+        run: npm ci
+
+      - name: Install Remotion Browser
         working-directory: project/MosquitoExplainer
         run: npx remotion browser ensure
 
-      - name: Render MP4 Video
+      - name: Render Complete MP4
         working-directory: project/MosquitoExplainer
-        run: npm run render
+        run: |
+          npx remotion render \
+            src/index.ts \
+            MosquitoExplainer \
+            out/mosquito-explainer.mp4 \
+            --concurrency=2
 
-      - name: Upload Rendered Video
+      - name: Verify Video Duration
+        working-directory: project/MosquitoExplainer
+        run: |
+          DURATION=$(ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            out/mosquito-explainer.mp4)
+
+          echo "Rendered duration: $DURATION seconds"
+
+          awk -v d="$DURATION" 'BEGIN {
+            if (d < 190) {
+              print "ERROR: Video is incomplete!"
+              exit 1
+            }
+            print "Video duration verified."
+          }'
+
+      - name: Upload Final Video
         uses: actions/upload-artifact@v4
         with:
-          name: Mosquito-Explainer-Video
+          name: Mosquito-Explainer-Final
           path: project/MosquitoExplainer/out/mosquito-explainer.mp4
           if-no-files-found: error
           retention-days: 7
