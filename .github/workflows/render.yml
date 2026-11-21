@@ -1,0 +1,99 @@
+name: Render Remotion Video
+
+# শুধু হাতে চালালে রেন্ডার হবে (আপনার অনুমতি ছাড়া নিজে নিজে চলবে না)
+on:
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: "Repository-র ভেতরে ZIP ফাইলের পথ"
+        required: true
+        default: "amazon-remotion-project.zip"
+
+env:
+  COMPOSITION_ID: AmazonVideo
+  ENTRY_POINT: src/index.ts
+  OUTPUT_FILE: out/amazon.mp4
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install system dependencies (Chrome libs + fuse-zip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse-zip rsync libnss3 libdbus-1-3 libatk1.0-0 \
+            libatk-bridge2.0-0 libgbm-dev libxrandr2 libxkbcommon-dev libxfixes3 \
+            libxcomposite1 libxdamage1 libpango-1.0-0 libcairo2 libcups2
+          sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
+
+      # ZIP-এর ভেতরের Structure পরীক্ষা (শুধু তালিকা পড়া, Extract নয়)
+      - name: Inspect ZIP structure
+        run: |
+          ZIP="${{ github.event.inputs.zip_path }}"
+          test -f "$ZIP" || { echo "ZIP পাওয়া যায়নি: $ZIP"; exit 1; }
+          zipinfo -1 "$ZIP" > /tmp/zip-list.txt
+          for f in package.json "${ENTRY_POINT}" src/Root.tsx src/Video.tsx \
+                   public/audio/Amazon-sul.m4a public/srt/Amazon-sul_ben.srt; do
+            grep -qx "$f" /tmp/zip-list.txt || { echo "ZIP-এ নেই: $f"; exit 1; }
+          done
+          echo "ZIP Structure ঠিক আছে"
+
+      # ZIP Extract না করে Virtual Filesystem হিসেবে Mount করা
+      - name: Mount ZIP as read-only virtual filesystem
+        run: |
+          ZIP="$(realpath "${{ github.event.inputs.zip_path }}")"
+          sudo mkdir -p /mnt/zip-ro /mnt/ov/upper /mnt/ov/work /mnt/project
+          sudo chown -R "$(id -u):$(id -g)" /mnt/ov
+          sudo fuse-zip -r -o allow_other,uid=$(id -u),gid=$(id -g) "$ZIP" /mnt/zip-ro
+          # npm install ও render-এর জন্য লেখার জায়গা: Overlay (নিচে ZIP, ওপরে লেখার স্তর)
+          if sudo mount -t overlay overlay \
+              -o lowerdir=/mnt/zip-ro,upperdir=/mnt/ov/upper,workdir=/mnt/ov/work /mnt/project; then
+            echo "Overlay mount সফল: ZIP Extract ছাড়াই পড়া হচ্ছে"
+          else
+            echo "Overlay mount হয়নি; Mount করা ZIP থেকে ফাইল কপি করা হচ্ছে (fallback)"
+            sudo rsync -a /mnt/zip-ro/ /mnt/project/
+            sudo chown -R "$(id -u):$(id -g)" /mnt/project
+          fi
+          ls /mnt/project
+
+      - name: Install dependencies
+        working-directory: /mnt/project
+        run: npm install --no-audit --no-fund
+
+      - name: Prepare headless browser
+        working-directory: /mnt/project
+        run: npx remotion browser ensure
+
+      - name: Verify composition
+        working-directory: /mnt/project
+        run: npx remotion compositions "$ENTRY_POINT" | tee /tmp/comps.txt && grep -q "$COMPOSITION_ID" /tmp/comps.txt
+
+      - name: Render video
+        working-directory: /mnt/project
+        run: |
+          mkdir -p out
+          npx remotion render "$ENTRY_POINT" "$COMPOSITION_ID" "$OUTPUT_FILE" \
+            --concurrency=2 --timeout=120000 --log=info
+
+      - name: Upload MP4 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: amazon-video
+          path: /mnt/project/out/amazon.mp4
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Unmount
+        if: always()
+        run: |
+          sudo umount /mnt/project || true
+          sudo umount /mnt/zip-ro || true
