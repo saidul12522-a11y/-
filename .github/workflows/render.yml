@@ -1,99 +1,122 @@
-name: Render Remotion Video
+name: Render Solar Video
 
-# শুধু হাতে চালালে রেন্ডার হবে (আপনার অনুমতি ছাড়া নিজে নিজে চলবে না)
 on:
   workflow_dispatch:
     inputs:
-      zip_path:
-        description: "Repository-র ভেতরে ZIP ফাইলের পথ"
-        required: true
-        default: "amazon-remotion-project.zip"
+      extract_fallback:
+        description: "true = ZIP mount ব্যর্থ হলে সাধারণ unzip ব্যবহার করবে (ডিফল্ট: false)"
+        type: boolean
+        default: false
+  push:
+    paths:
+      - "solar-video.zip"
+      - ".github/workflows/render.yml"
 
 env:
-  COMPOSITION_ID: AmazonVideo
-  ENTRY_POINT: src/index.ts
-  OUTPUT_FILE: out/amazon.mp4
+  ZIP_PATH: solar-video.zip      # Repository root-এ থাকা ZIP ফাইল
+  COMPOSITION_ID: SolarVideo     # src/Root.tsx-এর <Composition id="SolarVideo">
+  OUTPUT_NAME: solar-video.mp4
 
 jobs:
   render:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout repository
+      - name: Checkout (ZIP ফাইলটি ZIP অবস্থাতেই থাকবে)
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
-      - uses: actions/setup-node@v4
+      - name: Inspect ZIP (শুধু ZIP-এর তালিকা পড়া হয়, Extract নয়)
+        id: zip
+        run: |
+          set -euo pipefail
+          test -f "$ZIP_PATH" || { echo "::error::$ZIP_PATH Repository root-এ পাওয়া যায়নি"; exit 1; }
+          zipinfo -1 "$ZIP_PATH" > /tmp/entries.txt
+          PKG=$(grep -E '(^|/)package\.json$' /tmp/entries.txt | grep -v node_modules | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          test -n "$PKG" || { echo "::error::ZIP-এর ভেতরে package.json নেই"; exit 1; }
+          PROJ=$(dirname "$PKG"); [ "$PROJ" = "." ] && PROJ=""
+          P="${PROJ:+$PROJ/}"
+          for f in src/index.ts src/Root.tsx src/Video.tsx remotion.config.ts public/audio.wav public/subtitles.srt; do
+            grep -qx "${P}${f}" /tmp/entries.txt || { echo "::error::ZIP-এ ${P}${f} নেই"; exit 1; }
+          done
+          unzip -p "$ZIP_PATH" "${P}src/Root.tsx" | grep -q "id=\"$COMPOSITION_ID\"" \
+            || { echo "::error::Composition $COMPOSITION_ID পাওয়া যায়নি"; exit 1; }
+          echo "Project folder inside ZIP: '${PROJ}'"
+          echo "proj=$PROJ" >> "$GITHUB_OUTPUT"
+
+      - name: Mount ZIP as virtual filesystem (Extract ছাড়া)
+        if: ${{ inputs.extract_fallback != true }}
+        run: |
+          set -euo pipefail
+          PROJ="${{ steps.zip.outputs.proj }}"
+          sudo apt-get update -y
+          sudo apt-get install -y fuse-zip
+          echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          sudo mkdir -p /mnt/zip /mnt/upper /mnt/work /mnt/merged
+          sudo chown "$(id -u):$(id -g)" /mnt/upper /mnt/work /mnt/merged
+          # ZIP read-only mount: ফাইল দরকার হলে তখনই ZIP থেকে পড়া হয়
+          sudo fuse-zip -r -o allow_other,uid="$(id -u)",gid="$(id -g)" "$GITHUB_WORKSPACE/$ZIP_PATH" /mnt/zip
+          # Overlay: Remotion/npm যেন node_modules ও temp ফাইল লিখতে পারে (ZIP অপরিবর্তিত থাকে)
+          sudo mount -t overlay overlay \
+            -o "lowerdir=/mnt/zip${PROJ:+/$PROJ},upperdir=/mnt/upper,workdir=/mnt/work" /mnt/merged
+          ls /mnt/merged
+          echo "WORKDIR=/mnt/merged" >> "$GITHUB_ENV"
+
+      - name: Fallback - unzip (শুধু extract_fallback=true হলে)
+        if: ${{ inputs.extract_fallback == true }}
+        run: |
+          set -euo pipefail
+          PROJ="${{ steps.zip.outputs.proj }}"
+          mkdir -p /tmp/proj
+          unzip -q "$ZIP_PATH" -d /tmp/proj
+          echo "WORKDIR=/tmp/proj${PROJ:+/$PROJ}" >> "$GITHUB_ENV"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install system dependencies (Chrome libs + fuse-zip)
+      - name: Install Chrome dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse-zip rsync libnss3 libdbus-1-3 libatk1.0-0 \
-            libatk-bridge2.0-0 libgbm-dev libxrandr2 libxkbcommon-dev libxfixes3 \
-            libxcomposite1 libxdamage1 libpango-1.0-0 libcairo2 libcups2
-          sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
+          sudo apt-get update -y
+          sudo apt-get install -y libnss3 libdbus-1-3 libatk1.0-0 libasound2 libxrandr2 \
+            libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libgbm-dev libcups2 \
+            libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libxshmfence1
 
-      # ZIP-এর ভেতরের Structure পরীক্ষা (শুধু তালিকা পড়া, Extract নয়)
-      - name: Inspect ZIP structure
-        run: |
-          ZIP="${{ github.event.inputs.zip_path }}"
-          test -f "$ZIP" || { echo "ZIP পাওয়া যায়নি: $ZIP"; exit 1; }
-          zipinfo -1 "$ZIP" > /tmp/zip-list.txt
-          for f in package.json "${ENTRY_POINT}" src/Root.tsx src/Video.tsx \
-                   public/audio/Amazon-sul.m4a public/srt/Amazon-sul_ben.srt; do
-            grep -qx "$f" /tmp/zip-list.txt || { echo "ZIP-এ নেই: $f"; exit 1; }
-          done
-          echo "ZIP Structure ঠিক আছে"
-
-      # ZIP Extract না করে Virtual Filesystem হিসেবে Mount করা
-      - name: Mount ZIP as read-only virtual filesystem
-        run: |
-          ZIP="$(realpath "${{ github.event.inputs.zip_path }}")"
-          sudo mkdir -p /mnt/zip-ro /mnt/ov/upper /mnt/ov/work /mnt/project
-          sudo chown -R "$(id -u):$(id -g)" /mnt/ov
-          sudo fuse-zip -r -o allow_other,uid=$(id -u),gid=$(id -g) "$ZIP" /mnt/zip-ro
-          # npm install ও render-এর জন্য লেখার জায়গা: Overlay (নিচে ZIP, ওপরে লেখার স্তর)
-          if sudo mount -t overlay overlay \
-              -o lowerdir=/mnt/zip-ro,upperdir=/mnt/ov/upper,workdir=/mnt/ov/work /mnt/project; then
-            echo "Overlay mount সফল: ZIP Extract ছাড়াই পড়া হচ্ছে"
-          else
-            echo "Overlay mount হয়নি; Mount করা ZIP থেকে ফাইল কপি করা হচ্ছে (fallback)"
-            sudo rsync -a /mnt/zip-ro/ /mnt/project/
-            sudo chown -R "$(id -u):$(id -g)" /mnt/project
-          fi
-          ls /mnt/project
-
-      - name: Install dependencies
-        working-directory: /mnt/project
+      - name: Install project dependencies
+        working-directory: ${{ env.WORKDIR }}
         run: npm install --no-audit --no-fund
 
-      - name: Prepare headless browser
-        working-directory: /mnt/project
+      - name: Ensure Remotion browser
+        working-directory: ${{ env.WORKDIR }}
         run: npx remotion browser ensure
 
-      - name: Verify composition
-        working-directory: /mnt/project
-        run: npx remotion compositions "$ENTRY_POINT" | tee /tmp/comps.txt && grep -q "$COMPOSITION_ID" /tmp/comps.txt
-
       - name: Render video
-        working-directory: /mnt/project
+        working-directory: ${{ env.WORKDIR }}
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: |
-          mkdir -p out
-          npx remotion render "$ENTRY_POINT" "$COMPOSITION_ID" "$OUTPUT_FILE" \
-            --concurrency=2 --timeout=120000 --log=info
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          npx remotion render src/index.ts "$COMPOSITION_ID" "$GITHUB_WORKSPACE/out/$OUTPUT_NAME" \
+            --codec=h264 --concurrency=2 --timeout=120000 --log=info
+
+      - name: Verify output
+        run: |
+          ffprobe -v error -show_entries format=duration -of default=nw=1 "$GITHUB_WORKSPACE/out/$OUTPUT_NAME" \
+            || ls -lh "$GITHUB_WORKSPACE/out"
 
       - name: Upload MP4 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: amazon-video
-          path: /mnt/project/out/amazon.mp4
+          name: solar-video-mp4
+          path: out/${{ env.OUTPUT_NAME }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
 
-      - name: Unmount
-        if: always()
+      - name: Unmount ZIP
+        if: ${{ always() && inputs.extract_fallback != true }}
         run: |
-          sudo umount /mnt/project || true
-          sudo umount /mnt/zip-ro || true
+          sudo umount /mnt/merged || true
+          sudo umount /mnt/zip || true
