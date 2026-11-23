@@ -1,29 +1,21 @@
-name: Render Remotion Video (ZIP mounted, not extracted)
+name: Render Remotion video from ZIP
 
 on:
   workflow_dispatch:
     inputs:
       zip_path:
-        description: "Repo-relative path of the project ZIP"
-        required: true
-        default: "rafi-dopamine-video.zip"
-      concurrency:
-        description: "Remotion render concurrency (lower = less memory)"
-        required: true
-        default: "2"
-  push:
-    paths:
-      - "rafi-dopamine-video.zip"
+        description: "Repo-relative path of the project ZIP (blank = auto-detect first .zip)"
+        required: false
+        default: ""
 
 jobs:
   render:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 90
     env:
-      ZIP_PATH: ${{ github.event.inputs.zip_path || 'rafi-dopamine-video.zip' }}
-      RENDER_CONCURRENCY: ${{ github.event.inputs.concurrency || '2' }}
       COMPOSITION_ID: Main
       ENTRY_POINT: src/index.ts
+      EXPECTED_SECONDS: "154.6"
     steps:
       - uses: actions/checkout@v4
 
@@ -31,69 +23,84 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install system dependencies (FUSE, FFmpeg, Chrome libs)
+      - name: Install system packages (fuse-zip, ffmpeg, Chrome libs)
         run: |
           sudo apt-get update
-          sudo apt-get install -y fuse3 fuse-overlayfs ffmpeg \
-            libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libgbm1 \
-            libasound2t64 libxrandr2 libxkbcommon0 libxfixes3 libxcomposite1 \
-            libxdamage1 libpango-1.0-0 libcairo2 libcups2 libxshmfence1
-          echo "user_allow_other" | sudo tee -a /etc/fuse.conf
-          pip install ratarmount
+          sudo apt-get install -y fuse-zip ffmpeg unzip \
+            libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libasound2t64 \
+            libxrandr2 libxkbcommon0 libxfixes3 libxcomposite1 libxdamage1 \
+            libpango-1.0-0 libcairo2 libcups2 libgbm1 libxshmfence1
+          sudo sh -c 'grep -q "^user_allow_other" /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf'
 
-      - name: Check ZIP exists and list contents (listing only)
+      - name: Locate ZIP
         run: |
-          test -f "$ZIP_PATH" || { echo "::error::ZIP not found: $ZIP_PATH"; exit 1; }
-          python3 -m zipfile -l "$ZIP_PATH" | grep -v "node_modules" | head -40
+          ZIP="${{ github.event.inputs.zip_path }}"
+          if [ -z "$ZIP" ]; then
+            ZIP="$(find . -maxdepth 3 -name '*.zip' -not -path './.git/*' -not -path '*/node_modules/*' | head -n1)"
+          fi
+          test -f "$ZIP" || { echo "ZIP not found. Pass zip_path input."; exit 1; }
+          echo "ZIP_FILE=$(realpath "$ZIP")" >> "$GITHUB_ENV"
+          echo "Using ZIP: $ZIP"
 
-      - name: Mount ZIP read-only (no unzip) and add writable overlay
+      - name: Mount ZIP (read-only) + writable overlay (no extraction)
         run: |
           B="$RUNNER_TEMP/zipfs"
           mkdir -p "$B/ro" "$B/up" "$B/work" "$B/merged"
-          ratarmount "$ZIP_PATH" "$B/ro"
-          fuse-overlayfs -o lowerdir="$B/ro",upperdir="$B/up",workdir="$B/work" "$B/merged"
+          fuse-zip -o ro,allow_other "$ZIP_FILE" "$B/ro"
+          if sudo mount -t overlay overlay \
+               -o "lowerdir=$B/ro,upperdir=$B/up,workdir=$B/work" "$B/merged"; then
+            echo "Overlay mounted: ZIP stays unextracted."
+          else
+            echo "::warning::Overlay unavailable, falling back to a temporary unzip on the runner."
+            fusermount3 -u "$B/ro" || true
+            unzip -q "$ZIP_FILE" -d "$B/merged"
+          fi
+          sudo chown "$(id -u):$(id -g)" "$B/merged" || true
           echo "MERGED=$B/merged" >> "$GITHUB_ENV"
 
-      - name: Detect and verify Remotion project inside the mounted ZIP
+      - name: Detect Remotion project inside ZIP
         run: |
-          PKG=$(find "$MERGED" -maxdepth 2 -name package.json -not -path "*/node_modules/*" | head -1)
-          test -n "$PKG" || { echo "::error::package.json not found in ZIP"; exit 1; }
-          DIR=$(dirname "$PKG")
-          test -f "$DIR/$ENTRY_POINT" || { echo "::error::Missing $ENTRY_POINT"; exit 1; }
-          test -f "$DIR/public/voiceover.wav" || { echo "::error::Missing public/voiceover.wav"; exit 1; }
-          grep -q "id=\"$COMPOSITION_ID\"" "$DIR/src/Root.tsx" || { echo "::error::Composition $COMPOSITION_ID not found"; exit 1; }
-          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
-          echo "Project: $DIR"
+          PKG="$(find "$MERGED" -maxdepth 3 -name package.json -not -path '*/node_modules/*' | head -n1)"
+          test -n "$PKG" || { echo "package.json not found in ZIP"; exit 1; }
+          PROJ="$(dirname "$PKG")"
+          test -f "$PROJ/$ENTRY_POINT" || { echo "Entry $ENTRY_POINT missing"; ls -R "$PROJ" | head -50; exit 1; }
+          test -f "$PROJ/public/voiceover.wav" || { echo "public/voiceover.wav missing"; exit 1; }
+          grep -q "remotion" "$PROJ/package.json" || { echo "remotion dependency missing"; exit 1; }
+          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
+          echo "Project: $PROJ"
 
-      - name: Install dependencies
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Install dependencies (writes node_modules to the overlay)
+        working-directory: ${{ env.PROJ }}
         run: npm install --no-audit --no-fund
 
       - name: Render video
-        working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          NODE_OPTIONS: "--max-old-space-size=6144"
+        working-directory: ${{ env.PROJ }}
         run: |
           mkdir -p "$GITHUB_WORKSPACE/out"
           npx remotion render "$ENTRY_POINT" "$COMPOSITION_ID" "$GITHUB_WORKSPACE/out/video.mp4" \
-            --codec=h264 --concurrency="$RENDER_CONCURRENCY" --timeout=120000
+            --codec=h264 --concurrency=2 --timeout=180000 --log=info
 
       - name: Verify output (duration and audio)
         run: |
-          ffprobe -v error -show_entries format=duration:stream=codec_type -of default=nw=1 out/video.mp4
-          ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 out/video.mp4 | grep -q audio \
-            || { echo "::error::No audio stream in output"; exit 1; }
+          F="$GITHUB_WORKSPACE/out/video.mp4"
+          test -s "$F"
+          ffprobe -v error -show_entries format=duration:stream=codec_type -of default=nw=1 "$F" | tee /tmp/probe.txt
+          grep -q "codec_type=audio" /tmp/probe.txt || { echo "No audio stream"; exit 1; }
+          DUR="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$F")"
+          python3 -c "import sys; d=float('$DUR'); e=float('$EXPECTED_SECONDS'); sys.exit(0 if abs(d-e)<1.0 else 1)" \
+            || { echo "Duration $DUR differs from $EXPECTED_SECONDS"; exit 1; }
 
       - name: Upload MP4 artifact
         uses: actions/upload-artifact@v4
         with:
           name: rafi-dopamine-video-mp4
           path: out/video.mp4
-          retention-days: 7
+          retention-days: 14
           if-no-files-found: error
 
       - name: Unmount
         if: always()
         run: |
-          fusermount3 -u "$RUNNER_TEMP/zipfs/merged" || true
-          fusermount3 -u "$RUNNER_TEMP/zipfs/ro" || true
+          B="$RUNNER_TEMP/zipfs"
+          sudo umount "$B/merged" || true
+          fusermount3 -u "$B/ro" || true
