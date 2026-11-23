@@ -1,122 +1,99 @@
-name: Render Solar Video
+name: Render Remotion Video (ZIP mounted, not extracted)
 
 on:
   workflow_dispatch:
     inputs:
-      extract_fallback:
-        description: "true = ZIP mount ব্যর্থ হলে সাধারণ unzip ব্যবহার করবে (ডিফল্ট: false)"
-        type: boolean
-        default: false
+      zip_path:
+        description: "Repo-relative path of the project ZIP"
+        required: true
+        default: "rafi-dopamine-video.zip"
+      concurrency:
+        description: "Remotion render concurrency (lower = less memory)"
+        required: true
+        default: "2"
   push:
     paths:
-      - "solar-video.zip"
-      - ".github/workflows/render.yml"
-
-env:
-  ZIP_PATH: solar-video.zip      # Repository root-এ থাকা ZIP ফাইল
-  COMPOSITION_ID: SolarVideo     # src/Root.tsx-এর <Composition id="SolarVideo">
-  OUTPUT_NAME: solar-video.mp4
+      - "rafi-dopamine-video.zip"
 
 jobs:
   render:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ZIP_PATH: ${{ github.event.inputs.zip_path || 'rafi-dopamine-video.zip' }}
+      RENDER_CONCURRENCY: ${{ github.event.inputs.concurrency || '2' }}
+      COMPOSITION_ID: Main
+      ENTRY_POINT: src/index.ts
     steps:
-      - name: Checkout (ZIP ফাইলটি ZIP অবস্থাতেই থাকবে)
-        uses: actions/checkout@v4
-        with:
-          lfs: true
+      - uses: actions/checkout@v4
 
-      - name: Inspect ZIP (শুধু ZIP-এর তালিকা পড়া হয়, Extract নয়)
-        id: zip
-        run: |
-          set -euo pipefail
-          test -f "$ZIP_PATH" || { echo "::error::$ZIP_PATH Repository root-এ পাওয়া যায়নি"; exit 1; }
-          zipinfo -1 "$ZIP_PATH" > /tmp/entries.txt
-          PKG=$(grep -E '(^|/)package\.json$' /tmp/entries.txt | grep -v node_modules | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
-          test -n "$PKG" || { echo "::error::ZIP-এর ভেতরে package.json নেই"; exit 1; }
-          PROJ=$(dirname "$PKG"); [ "$PROJ" = "." ] && PROJ=""
-          P="${PROJ:+$PROJ/}"
-          for f in src/index.ts src/Root.tsx src/Video.tsx remotion.config.ts public/audio.wav public/subtitles.srt; do
-            grep -qx "${P}${f}" /tmp/entries.txt || { echo "::error::ZIP-এ ${P}${f} নেই"; exit 1; }
-          done
-          unzip -p "$ZIP_PATH" "${P}src/Root.tsx" | grep -q "id=\"$COMPOSITION_ID\"" \
-            || { echo "::error::Composition $COMPOSITION_ID পাওয়া যায়নি"; exit 1; }
-          echo "Project folder inside ZIP: '${PROJ}'"
-          echo "proj=$PROJ" >> "$GITHUB_OUTPUT"
-
-      - name: Mount ZIP as virtual filesystem (Extract ছাড়া)
-        if: ${{ inputs.extract_fallback != true }}
-        run: |
-          set -euo pipefail
-          PROJ="${{ steps.zip.outputs.proj }}"
-          sudo apt-get update -y
-          sudo apt-get install -y fuse-zip
-          echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
-          sudo mkdir -p /mnt/zip /mnt/upper /mnt/work /mnt/merged
-          sudo chown "$(id -u):$(id -g)" /mnt/upper /mnt/work /mnt/merged
-          # ZIP read-only mount: ফাইল দরকার হলে তখনই ZIP থেকে পড়া হয়
-          sudo fuse-zip -r -o allow_other,uid="$(id -u)",gid="$(id -g)" "$GITHUB_WORKSPACE/$ZIP_PATH" /mnt/zip
-          # Overlay: Remotion/npm যেন node_modules ও temp ফাইল লিখতে পারে (ZIP অপরিবর্তিত থাকে)
-          sudo mount -t overlay overlay \
-            -o "lowerdir=/mnt/zip${PROJ:+/$PROJ},upperdir=/mnt/upper,workdir=/mnt/work" /mnt/merged
-          ls /mnt/merged
-          echo "WORKDIR=/mnt/merged" >> "$GITHUB_ENV"
-
-      - name: Fallback - unzip (শুধু extract_fallback=true হলে)
-        if: ${{ inputs.extract_fallback == true }}
-        run: |
-          set -euo pipefail
-          PROJ="${{ steps.zip.outputs.proj }}"
-          mkdir -p /tmp/proj
-          unzip -q "$ZIP_PATH" -d /tmp/proj
-          echo "WORKDIR=/tmp/proj${PROJ:+/$PROJ}" >> "$GITHUB_ENV"
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Chrome dependencies
+      - name: Install system dependencies (FUSE, FFmpeg, Chrome libs)
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y libnss3 libdbus-1-3 libatk1.0-0 libasound2 libxrandr2 \
-            libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libgbm-dev libcups2 \
-            libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libxshmfence1
+          sudo apt-get update
+          sudo apt-get install -y fuse3 fuse-overlayfs ffmpeg \
+            libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libgbm1 \
+            libasound2t64 libxrandr2 libxkbcommon0 libxfixes3 libxcomposite1 \
+            libxdamage1 libpango-1.0-0 libcairo2 libcups2 libxshmfence1
+          echo "user_allow_other" | sudo tee -a /etc/fuse.conf
+          pip install ratarmount
 
-      - name: Install project dependencies
-        working-directory: ${{ env.WORKDIR }}
+      - name: Check ZIP exists and list contents (listing only)
+        run: |
+          test -f "$ZIP_PATH" || { echo "::error::ZIP not found: $ZIP_PATH"; exit 1; }
+          python3 -m zipfile -l "$ZIP_PATH" | grep -v "node_modules" | head -40
+
+      - name: Mount ZIP read-only (no unzip) and add writable overlay
+        run: |
+          B="$RUNNER_TEMP/zipfs"
+          mkdir -p "$B/ro" "$B/up" "$B/work" "$B/merged"
+          ratarmount "$ZIP_PATH" "$B/ro"
+          fuse-overlayfs -o lowerdir="$B/ro",upperdir="$B/up",workdir="$B/work" "$B/merged"
+          echo "MERGED=$B/merged" >> "$GITHUB_ENV"
+
+      - name: Detect and verify Remotion project inside the mounted ZIP
+        run: |
+          PKG=$(find "$MERGED" -maxdepth 2 -name package.json -not -path "*/node_modules/*" | head -1)
+          test -n "$PKG" || { echo "::error::package.json not found in ZIP"; exit 1; }
+          DIR=$(dirname "$PKG")
+          test -f "$DIR/$ENTRY_POINT" || { echo "::error::Missing $ENTRY_POINT"; exit 1; }
+          test -f "$DIR/public/voiceover.wav" || { echo "::error::Missing public/voiceover.wav"; exit 1; }
+          grep -q "id=\"$COMPOSITION_ID\"" "$DIR/src/Root.tsx" || { echo "::error::Composition $COMPOSITION_ID not found"; exit 1; }
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          echo "Project: $DIR"
+
+      - name: Install dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
         run: npm install --no-audit --no-fund
 
-      - name: Ensure Remotion browser
-        working-directory: ${{ env.WORKDIR }}
-        run: npx remotion browser ensure
-
       - name: Render video
-        working-directory: ${{ env.WORKDIR }}
+        working-directory: ${{ env.PROJECT_DIR }}
         env:
-          NODE_OPTIONS: --max-old-space-size=6144
+          NODE_OPTIONS: "--max-old-space-size=6144"
         run: |
           mkdir -p "$GITHUB_WORKSPACE/out"
-          npx remotion render src/index.ts "$COMPOSITION_ID" "$GITHUB_WORKSPACE/out/$OUTPUT_NAME" \
-            --codec=h264 --concurrency=2 --timeout=120000 --log=info
+          npx remotion render "$ENTRY_POINT" "$COMPOSITION_ID" "$GITHUB_WORKSPACE/out/video.mp4" \
+            --codec=h264 --concurrency="$RENDER_CONCURRENCY" --timeout=120000
 
-      - name: Verify output
+      - name: Verify output (duration and audio)
         run: |
-          ffprobe -v error -show_entries format=duration -of default=nw=1 "$GITHUB_WORKSPACE/out/$OUTPUT_NAME" \
-            || ls -lh "$GITHUB_WORKSPACE/out"
+          ffprobe -v error -show_entries format=duration:stream=codec_type -of default=nw=1 out/video.mp4
+          ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 out/video.mp4 | grep -q audio \
+            || { echo "::error::No audio stream in output"; exit 1; }
 
       - name: Upload MP4 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: solar-video-mp4
-          path: out/${{ env.OUTPUT_NAME }}
+          name: rafi-dopamine-video-mp4
+          path: out/video.mp4
+          retention-days: 7
           if-no-files-found: error
-          retention-days: 14
 
-      - name: Unmount ZIP
-        if: ${{ always() && inputs.extract_fallback != true }}
+      - name: Unmount
+        if: always()
         run: |
-          sudo umount /mnt/merged || true
-          sudo umount /mnt/zip || true
+          fusermount3 -u "$RUNNER_TEMP/zipfs/merged" || true
+          fusermount3 -u "$RUNNER_TEMP/zipfs/ro" || true
