@@ -3,10 +3,6 @@ name: Render Rahimer Chaya
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'rahimer-chaya.zip'
-      - '.github/workflows/render.yml'
 
 permissions:
   contents: read
@@ -14,7 +10,7 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
 
     steps:
       - name: Checkout Repository
@@ -24,37 +20,74 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: ''
 
-      - name: Prepare Project
+      - name: Check ZIP File
         run: |
-          mkdir -p "$RUNNER_TEMP/rahimer-project"
-          unzip -q "$GITHUB_WORKSPACE/rahimer-chaya.zip" \
-            -d "$RUNNER_TEMP/rahimer-project"
-          echo "PROJECT_DIR=$RUNNER_TEMP/rahimer-project" >> $GITHUB_ENV
+          if [ ! -f "rahimer-chaya.zip" ]; then
+            echo "ERROR: rahimer-chaya.zip not found in repository root."
+            exit 1
+          fi
+
+      - name: Extract Project
+        run: |
+          mkdir -p project
+          unzip -q rahimer-chaya.zip -d project
+
+      - name: Fix Missing Door Import
+        working-directory: project
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          file = Path("src/scenes/part1.tsx")
+
+          if not file.exists():
+              raise SystemExit("ERROR: part1.tsx not found")
+
+          code = file.read_text(encoding="utf-8")
+
+          pattern = r"(import\s*\{)([^}]*)(\}\s*from\s*['\"]\.\./kit/Props['\"]\s*;)"
+
+          match = re.search(pattern, code)
+
+          if not match:
+              raise SystemExit("ERROR: Props import statement not found")
+
+          imports = match.group(2)
+
+          if not re.search(r"\bDoor\b", imports):
+              imports = imports.rstrip() + ", Door"
+
+              code = (
+                  code[:match.start()]
+                  + match.group(1)
+                  + imports
+                  + match.group(3)
+                  + code[match.end():]
+              )
+
+              file.write_text(code, encoding="utf-8")
+
+          print("SUCCESS: Door import checked/fixed.")
+          PY
 
       - name: Install Dependencies
-        working-directory: ${{ runner.temp }}/rahimer-project
+        working-directory: project
         run: |
           npm install --no-audit --no-fund
 
-      - name: Prepare Output
-        working-directory: ${{ runner.temp }}/rahimer-project
-        run: mkdir -p out
-
       - name: Render Video
-        working-directory: ${{ runner.temp }}/rahimer-project
+        working-directory: project
         run: |
-          npx remotion render \
-            src/index.ts \
-            RahimerChaya \
-            out/rahimer-chaya.mp4 \
-            --concurrency=2
+          mkdir -p out
+          npx remotion render src/index.ts RahimerChaya out/rahimer-chaya.mp4 --concurrency=2
 
       - name: Upload Rendered Video
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Rahimer-Chaya-Video
-          path: ${{ runner.temp }}/rahimer-project/out/rahimer-chaya.mp4
+          path: project/out/rahimer-chaya.mp4
           if-no-files-found: error
           retention-days: 7
