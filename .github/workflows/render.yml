@@ -1,106 +1,60 @@
-name: Render Remotion video from ZIP
+
+name: Render Rahimer Chaya
 
 on:
   workflow_dispatch:
-    inputs:
-      zip_path:
-        description: "Repo-relative path of the project ZIP (blank = auto-detect first .zip)"
-        required: false
-        default: ""
+  push:
+    paths:
+      - 'rahimer-chaya.zip'
+      - '.github/workflows/render.yml'
+
+permissions:
+  contents: read
 
 jobs:
   render:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    env:
-      COMPOSITION_ID: Main
-      ENTRY_POINT: src/index.ts
-      EXPECTED_SECONDS: "154.6"
-    steps:
-      - uses: actions/checkout@v4
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: ''
 
-      - name: Install system packages (fuse-zip, ffmpeg, Chrome libs)
+      - name: Prepare Project
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse-zip ffmpeg unzip \
-            libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libasound2t64 \
-            libxrandr2 libxkbcommon0 libxfixes3 libxcomposite1 libxdamage1 \
-            libpango-1.0-0 libcairo2 libcups2 libgbm1 libxshmfence1
-          sudo sh -c 'grep -q "^user_allow_other" /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf'
+          mkdir -p "$RUNNER_TEMP/rahimer-project"
+          unzip -q "$GITHUB_WORKSPACE/rahimer-chaya.zip" \
+            -d "$RUNNER_TEMP/rahimer-project"
+          echo "PROJECT_DIR=$RUNNER_TEMP/rahimer-project" >> $GITHUB_ENV
 
-      - name: Locate ZIP
+      - name: Install Dependencies
+        working-directory: ${{ runner.temp }}/rahimer-project
         run: |
-          ZIP="${{ github.event.inputs.zip_path }}"
-          if [ -z "$ZIP" ]; then
-            ZIP="$(find . -maxdepth 3 -name '*.zip' -not -path './.git/*' -not -path '*/node_modules/*' | head -n1)"
-          fi
-          test -f "$ZIP" || { echo "ZIP not found. Pass zip_path input."; exit 1; }
-          echo "ZIP_FILE=$(realpath "$ZIP")" >> "$GITHUB_ENV"
-          echo "Using ZIP: $ZIP"
+          npm install --no-audit --no-fund
 
-      - name: Mount ZIP (read-only) + writable overlay (no extraction)
+      - name: Prepare Output
+        working-directory: ${{ runner.temp }}/rahimer-project
+        run: mkdir -p out
+
+      - name: Render Video
+        working-directory: ${{ runner.temp }}/rahimer-project
         run: |
-          B="$RUNNER_TEMP/zipfs"
-          mkdir -p "$B/ro" "$B/up" "$B/work" "$B/merged"
-          fuse-zip -o ro,allow_other "$ZIP_FILE" "$B/ro"
-          if sudo mount -t overlay overlay \
-               -o "lowerdir=$B/ro,upperdir=$B/up,workdir=$B/work" "$B/merged"; then
-            echo "Overlay mounted: ZIP stays unextracted."
-          else
-            echo "::warning::Overlay unavailable, falling back to a temporary unzip on the runner."
-            fusermount3 -u "$B/ro" || true
-            unzip -q "$ZIP_FILE" -d "$B/merged"
-          fi
-          sudo chown "$(id -u):$(id -g)" "$B/merged" || true
-          echo "MERGED=$B/merged" >> "$GITHUB_ENV"
+          npx remotion render \
+            src/index.ts \
+            RahimerChaya \
+            out/rahimer-chaya.mp4 \
+            --concurrency=2
 
-      - name: Detect Remotion project inside ZIP
-        run: |
-          PKG="$(find "$MERGED" -maxdepth 3 -name package.json -not -path '*/node_modules/*' | head -n1)"
-          test -n "$PKG" || { echo "package.json not found in ZIP"; exit 1; }
-          PROJ="$(dirname "$PKG")"
-          test -f "$PROJ/$ENTRY_POINT" || { echo "Entry $ENTRY_POINT missing"; ls -R "$PROJ" | head -50; exit 1; }
-          test -f "$PROJ/public/voiceover.wav" || { echo "public/voiceover.wav missing"; exit 1; }
-          grep -q "remotion" "$PROJ/package.json" || { echo "remotion dependency missing"; exit 1; }
-          echo "PROJ=$PROJ" >> "$GITHUB_ENV"
-          echo "Project: $PROJ"
-
-      - name: Install dependencies (writes node_modules to the overlay)
-        working-directory: ${{ env.PROJ }}
-        run: npm install --no-audit --no-fund
-
-      - name: Render video
-        working-directory: ${{ env.PROJ }}
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          npx remotion render "$ENTRY_POINT" "$COMPOSITION_ID" "$GITHUB_WORKSPACE/out/video.mp4" \
-            --codec=h264 --concurrency=2 --timeout=180000 --log=info
-
-      - name: Verify output (duration and audio)
-        run: |
-          F="$GITHUB_WORKSPACE/out/video.mp4"
-          test -s "$F"
-          ffprobe -v error -show_entries format=duration:stream=codec_type -of default=nw=1 "$F" | tee /tmp/probe.txt
-          grep -q "codec_type=audio" /tmp/probe.txt || { echo "No audio stream"; exit 1; }
-          DUR="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$F")"
-          python3 -c "import sys; d=float('$DUR'); e=float('$EXPECTED_SECONDS'); sys.exit(0 if abs(d-e)<1.0 else 1)" \
-            || { echo "Duration $DUR differs from $EXPECTED_SECONDS"; exit 1; }
-
-      - name: Upload MP4 artifact
+      - name: Upload Rendered Video
         uses: actions/upload-artifact@v4
         with:
-          name: rafi-dopamine-video-mp4
-          path: out/video.mp4
-          retention-days: 14
+          name: Rahimer-Chaya-Video
+          path: ${{ runner.temp }}/rahimer-project/out/rahimer-chaya.mp4
           if-no-files-found: error
-
-      - name: Unmount
-        if: always()
-        run: |
-          B="$RUNNER_TEMP/zipfs"
-          sudo umount "$B/merged" || true
-          fusermount3 -u "$B/ro" || true
+          retention-days: 7
