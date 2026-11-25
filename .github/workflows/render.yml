@@ -1,58 +1,109 @@
-
-name: Render Rafi Story Video
+name: Render video
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'rafi-story.zip'
-      - '.github/workflows/render.yml'
+    inputs:
+      mode:
+        description: "test = 11 still frames + 5 second clip; full = whole video"
+        type: choice
+        default: test
+        options: [test, full]
+      shots:
+        description: "full mode only: all (resume, only missing shots), force (everything), or e.g. 3,7"
+        type: string
+        default: all
+      shadows:
+        description: "Soft shadows (slower but nicer)"
+        type: choice
+        default: "true"
+        options: ["true", "false"]
+      gl:
+        description: "Chromium GL backend"
+        type: choice
+        default: swangle
+        options: [swangle, angle, swiftshader, angle-egl]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   render:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-
+    runs-on: ubuntu-22.04
+    timeout-minutes: 340
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Locate project (repo root or project.zip)
+        id: loc
+        run: |
+          if [ -f package.json ]; then
+            D=.
+          else
+            unzip -q -o project.zip -d _unz
+            D=$(dirname "$(find _unz -name package.json -not -path '*/node_modules/*' | head -1)")
+          fi
+          echo "dir=$D" >> "$GITHUB_OUTPUT"
+          echo "Project directory: $D"
+
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Extract ZIP Temporarily
+      - name: System packages (Chromium libs, Bengali fonts, ffmpeg)
         run: |
-          mkdir -p "$RUNNER_TEMP/rafi-project"
-          unzip -q "$GITHUB_WORKSPACE/rafi-story.zip" \
-            -d "$RUNNER_TEMP/rafi-project"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libasound2 libxrandr2 libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libcups2 fonts-noto-core ffmpeg
+          fc-cache -f
+          fc-list | grep -i "Noto Sans Bengali" | head -2 || echo "WARNING: Bengali font not found"
 
-      - name: Install Dependencies
-        working-directory: ${{ runner.temp }}/rafi-project/rafi-story
+      - name: Install dependencies
+        working-directory: ${{ steps.loc.outputs.dir }}
         run: |
           npm install --no-audit --no-fund
+          npx remotion browser ensure
 
-      - name: Render Full HD Video
-        working-directory: ${{ runner.temp }}/rafi-project/rafi-story
-        run: |
-          mkdir -p out
+      - name: Restore previously rendered shots
+        if: ${{ inputs.mode == 'full' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.loc.outputs.dir }}/out/shots
+          key: shots-${{ github.run_id }}
+          restore-keys: shots-
 
-          npx remotion render \
-            src/index.ts \
-            RafiStory \
-            out/rafi-story.mp4 \
-            --codec=h264 \
-            --image-format=jpeg \
-            --concurrency=2
+      - name: Render
+        working-directory: ${{ steps.loc.outputs.dir }}
+        env:
+          GL: ${{ inputs.gl }}
+          SHADOWS: ${{ inputs.shadows }}
+        run: bash scripts/render.sh "${{ inputs.mode }}" "${{ inputs.shots }}"
 
-      - name: Upload Rendered Video
+      - name: Save rendered shots (resume support)
+        if: ${{ always() && inputs.mode == 'full' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.loc.outputs.dir }}/out/shots
+          key: shots-${{ github.run_id }}
+
+      - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Rafi-Story-FullHD
-          path: ${{ runner.temp }}/rafi-project/rafi-story/out/rafi-story.mp4
-          if-no-files-found: error
-          retention-days: 7
+          name: render-output-${{ inputs.mode }}
+          path: |
+            ${{ steps.loc.outputs.dir }}/out/final_video.mp4
+            ${{ steps.loc.outputs.dir }}/out/test_5s.mp4
+            ${{ steps.loc.outputs.dir }}/out/contact_sheet.png
+            ${{ steps.loc.outputs.dir }}/out/final_contact_sheet.png
+            ${{ steps.loc.outputs.dir }}/out/stills
+            ${{ steps.loc.outputs.dir }}/out/qc.txt
+          if-no-files-found: ignore
+
+      - name: Publish as a Release (direct download link)
+        if: ${{ inputs.mode == 'full' && success() }}
+        working-directory: ${{ steps.loc.outputs.dir }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "video-${{ github.run_number }}" out/final_video.mp4 out/final_contact_sheet.png \
+            --repo "${{ github.repository }}" --title "Final video #${{ github.run_number }}" \
+            --notes "Rendered by GitHub Actions. Open this page on your phone and tap final_video.mp4 to download."
