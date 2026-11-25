@@ -1,8 +1,12 @@
 
-name: Render Rahimer Chaya
+name: Render Rafi Story Video
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - 'rafi-story.zip'
+      - '.github/workflows/render.yml'
 
 permissions:
   contents: read
@@ -10,7 +14,7 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Repository
@@ -21,73 +25,34 @@ jobs:
         with:
           node-version: 20
 
-      - name: Check ZIP File
+      - name: Extract ZIP Temporarily
         run: |
-          if [ ! -f "rahimer-chaya.zip" ]; then
-            echo "ERROR: rahimer-chaya.zip not found in repository root."
-            exit 1
-          fi
-
-      - name: Extract Project
-        run: |
-          mkdir -p project
-          unzip -q rahimer-chaya.zip -d project
-
-      - name: Fix Missing Door Import
-        working-directory: project
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          file = Path("src/scenes/part1.tsx")
-
-          if not file.exists():
-              raise SystemExit("ERROR: part1.tsx not found")
-
-          code = file.read_text(encoding="utf-8")
-
-          pattern = r"(import\s*\{)([^}]*)(\}\s*from\s*['\"]\.\./kit/Props['\"]\s*;)"
-
-          match = re.search(pattern, code)
-
-          if not match:
-              raise SystemExit("ERROR: Props import statement not found")
-
-          imports = match.group(2)
-
-          if not re.search(r"\bDoor\b", imports):
-              imports = imports.rstrip() + ", Door"
-
-              code = (
-                  code[:match.start()]
-                  + match.group(1)
-                  + imports
-                  + match.group(3)
-                  + code[match.end():]
-              )
-
-              file.write_text(code, encoding="utf-8")
-
-          print("SUCCESS: Door import checked/fixed.")
-          PY
+          mkdir -p "$RUNNER_TEMP/rafi-project"
+          unzip -q "$GITHUB_WORKSPACE/rafi-story.zip" \
+            -d "$RUNNER_TEMP/rafi-project"
 
       - name: Install Dependencies
-        working-directory: project
+        working-directory: ${{ runner.temp }}/rafi-project/rafi-story
         run: |
           npm install --no-audit --no-fund
 
-      - name: Render Video
-        working-directory: project
+      - name: Render Full HD Video
+        working-directory: ${{ runner.temp }}/rafi-project/rafi-story
         run: |
           mkdir -p out
-          npx remotion render src/index.ts RahimerChaya out/rahimer-chaya.mp4 --concurrency=2
+
+          npx remotion render \
+            src/index.ts \
+            RafiStory \
+            out/rafi-story.mp4 \
+            --codec=h264 \
+            --image-format=jpeg \
+            --concurrency=2
 
       - name: Upload Rendered Video
-        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Rahimer-Chaya-Video
-          path: project/out/rahimer-chaya.mp4
+          name: Rafi-Story-FullHD
+          path: ${{ runner.temp }}/rafi-project/rafi-story/out/rafi-story.mp4
           if-no-files-found: error
           retention-days: 7
